@@ -1,7 +1,6 @@
 cask "moonly" do
-  version "0.1.0"
-  # Replace with the real DMG checksum from `Scripts/make_dmg.sh`.
-  sha256 "dfd3f225968faa9479ec06e7de4f5abb1060b011009303cc49286495a88ac7ea"
+  version "0.2.0"
+  sha256 "71f3854ec5dc827c922a39020073d7e17d819d4c6e2d2fe5324497d03008a4ba"
 
   # GitHub Releases caps assets at 2 GB; the app itself is tiny, but host the
   # DMG wherever you like. Hugging Face Hub (LFS) is a good fit here.
