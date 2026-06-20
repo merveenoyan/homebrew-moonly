@@ -1,0 +1,15 @@
+.DS_Store
+.build/
+.swiftpm/
+*.xcodeproj
+DerivedData/
+
+# Build outputs
+build/
+dist/
+*.dmg
+*.app
+
+# Models are never committed — they are downloaded at install time
+*.gguf
+Sources/moonly/Resources/*.gguf
