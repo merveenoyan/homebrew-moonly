@@ -357,14 +357,15 @@ final class CycleStore: ObservableObject {
     }
 
     /// Assemble everything the recommender needs for one generation.
-    func promptContext(on date: Date = Date()) -> PromptContext {
+    func promptContext(on date: Date = Date(), inference: PhaseInference? = nil) -> PromptContext {
         PromptContext(
             summary: summary(on: date),
             today: day(date),
             lastThreePeriodStarts: lastPeriodStarts(3, onOrBefore: date),
             forecast: upcomingPhases(on: date),
             previous: previousCycleInsight(on: date),
-            recent: recentLogs(days: 10, on: date)
+            recent: recentLogs(days: 10, on: date),
+            inference: inference
         )
     }
 
@@ -378,12 +379,16 @@ final class CycleStore: ObservableObject {
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: storeURL) else { return }
-        guard let decoded = try? JSONDecoder.moonly.decode(Persisted.self, from: data) else { return }
+        guard let json = DataEncryptor.readMigrating(from: storeURL) else { return }
+        guard let decoded = try? JSONDecoder.moonly.decode(Persisted.self, from: json) else { return }
         logs = Dictionary(decoded.logs.map { (day($0.date), $0) }, uniquingKeysWith: { first, _ in first })
         cycleLengthOverride = decoded.cycleLengthOverride
         periodLengthOverride = decoded.periodLengthOverride
         customSymptoms = decoded.customSymptoms ?? []
+        // Re-save encrypted if the file was plaintext (one-time migration).
+        if let raw = try? Data(contentsOf: storeURL), raw.first == 0x7B || raw.first == 0x5B {
+            save()
+        }
     }
 
     private func save() {
@@ -393,8 +398,8 @@ final class CycleStore: ObservableObject {
             periodLengthOverride: periodLengthOverride,
             customSymptoms: customSymptoms.isEmpty ? nil : customSymptoms
         )
-        guard let data = try? JSONEncoder.moonly.encode(payload) else { return }
-        try? data.write(to: storeURL, options: .atomic)
+        guard let encrypted = try? DataEncryptor.encrypt(payload) else { return }
+        try? encrypted.write(to: storeURL, options: .atomic)
     }
 }
 

@@ -24,9 +24,13 @@ cp "$ROOT/Scripts/fetch_model.sh" "$APP/Contents/Resources/fetch_model.sh"
 chmod +x "$APP/Contents/Resources/fetch_model.sh"
 [ -f "$ROOT/Packaging/AppIcon.icns" ] && cp "$ROOT/Packaging/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
-# Ad-hoc sign so the hardened runtime lets us spawn the llama-server child.
+# Sign with sandbox entitlements + hardened runtime.
 # Replace `-` with a Developer ID identity for notarized distribution.
-echo "==> codesign (ad-hoc)"
-codesign --force --deep --sign - "$APP" || echo "warning: codesign failed (ok for local testing)"
+ENTITLEMENTS="$ROOT/Packaging/Moonly.entitlements"
+echo "==> codesign (ad-hoc, sandboxed)"
+codesign --force --deep --sign - \
+    --entitlements "$ENTITLEMENTS" \
+    --options runtime \
+    "$APP" || echo "warning: codesign failed (ok for local testing)"
 
 echo "Built $APP"

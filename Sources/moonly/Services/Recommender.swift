@@ -62,8 +62,8 @@ final class RecommendationEngine: ObservableObject {
 
     /// Load cached AI recommendations from disk (persisted from today's run).
     func loadCachedRecommendations() {
-        guard let data = try? Data(contentsOf: Self.cacheURL),
-              let cached = try? JSONDecoder().decode([CachedRec].self, from: data) else { return }
+        guard let json = DataEncryptor.readMigrating(from: Self.cacheURL),
+              let cached = try? JSONDecoder().decode([CachedRec].self, from: json) else { return }
         let recs = cached.map { Recommendation(icon: $0.icon, title: $0.title, body: $0.body) }
         if !recs.isEmpty {
             items = recs
@@ -203,8 +203,8 @@ final class RecommendationEngine: ObservableObject {
 
     private func cacheRecommendations(_ recs: [Recommendation]) {
         let items = recs.map { CachedRec(icon: $0.icon, title: $0.title, body: $0.body) }
-        guard let data = try? JSONEncoder().encode(items) else { return }
-        try? data.write(to: Self.cacheURL, options: .atomic)
+        guard let encrypted = try? DataEncryptor.encrypt(items, encoder: JSONEncoder()) else { return }
+        try? encrypted.write(to: Self.cacheURL, options: .atomic)
     }
 
     // MARK: - Prompting
@@ -248,7 +248,18 @@ final class RecommendationEngine: ObservableObject {
             lines.append("Last period starts (most recent first): \(dates)")
         }
         lines.append("Average cycle: \(s.cycleLength) days · average period: \(s.periodLength) days")
-        lines.append("Current: cycle day \(s.cycleDay), \(s.phase.title) phase — \(s.phase.blurb)")
+        if let inf = ctx.inference, inf.confidence >= 0.5 {
+            lines.append("Current: cycle day \(s.cycleDay)")
+            lines.append("LLM-inferred phase: \(inf.phase.title) (intensity: \(inf.intensity.label), confidence: \(Int(inf.confidence * 100))%)")
+            lines.append("Inference reasoning: \(inf.reasoning)")
+            if let t = inf.predictedTransition {
+                let when = t.estimatedDaysAway == 0 ? "today"
+                    : t.estimatedDaysAway == 1 ? "tomorrow" : "in \(t.estimatedDaysAway) days"
+                lines.append("Predicted next transition: \(t.toPhase.title) \(when)")
+            }
+        } else {
+            lines.append("Current: cycle day \(s.cycleDay), \(s.phase.title) phase — \(s.phase.blurb)")
+        }
 
         // Forecast of upcoming phase transitions.
         if !ctx.forecast.isEmpty {
@@ -306,8 +317,10 @@ final class RecommendationEngine: ObservableObject {
 
     /// Pull a JSON array out of the model reply, tolerating code fences/extra text.
     static func parse(_ raw: String) -> [Recommendation] {
+        #if DEBUG
         let debugURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Moonly/last_model_response.txt")
+        #endif
 
         // Strip markdown code fences if present.
         var cleaned = raw
@@ -316,7 +329,9 @@ final class RecommendationEngine: ObservableObject {
 
         guard let start = cleaned.firstIndex(of: "["),
               let end = cleaned.lastIndex(of: "]"), start < end else {
+            #if DEBUG
             try? raw.write(to: debugURL, atomically: true, encoding: .utf8)
+            #endif
             return []
         }
         var json = String(cleaned[start...end])
@@ -334,7 +349,9 @@ final class RecommendationEngine: ObservableObject {
         struct Item: Codable { let icon: String?; let title: String?; let body: String? }
         guard let data = json.data(using: .utf8),
               let items = try? JSONDecoder().decode([Item].self, from: data) else {
+            #if DEBUG
             try? raw.write(to: debugURL, atomically: true, encoding: .utf8)
+            #endif
             return []
         }
 
@@ -348,9 +365,11 @@ final class RecommendationEngine: ObservableObject {
             )
         }
 
+        #if DEBUG
         if result.isEmpty {
             try? raw.write(to: debugURL, atomically: true, encoding: .utf8)
         }
+        #endif
         return result
     }
 

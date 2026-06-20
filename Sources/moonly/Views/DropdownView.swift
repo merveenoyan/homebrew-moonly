@@ -7,15 +7,17 @@ struct DropdownView: View {
     @EnvironmentObject var store: CycleStore
     @EnvironmentObject var llama: LlamaServer
     @StateObject private var engine = RecommendationEngine()
+    @StateObject private var phaseEngine = PhaseInferenceEngine()
 
-    // The dropdown always logs/looks at "now".
     private var today: Date { Date() }
-    private var context: PromptContext { store.promptContext(on: today) }
+    private var context: PromptContext {
+        store.promptContext(on: today, inference: phaseEngine.inference)
+    }
     private var summary: CycleSummary { context.summary }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            CycleHeaderView(summary: summary)
+            CycleHeaderView(summary: summary, inference: phaseEngine.inference)
 
             Divider()
 
@@ -39,7 +41,19 @@ struct DropdownView: View {
             engine.requestNotificationPermission()
             let ctx = context
             engine.showBaseline(for: ctx.summary)
-            await engine.generateOnceDaily(context: ctx)
+
+            let latestLog = store.recentLogs(days: 1, on: today).first?.date
+            if !phaseEngine.isFresh(latestLogDate: latestLog) {
+                await phaseEngine.infer(store: store, on: today)
+            }
+
+            let freshCtx = store.promptContext(on: today, inference: phaseEngine.inference)
+            await engine.generateOnceDaily(context: freshCtx)
+        }
+        .onChange(of: store.logs) {
+            Task {
+                await phaseEngine.infer(store: store, on: today)
+            }
         }
     }
 

@@ -8,6 +8,10 @@ struct RecommendationCard: View {
     let context: PromptContext
 
     private var summary: CycleSummary { context.summary }
+    private var displayPhase: CyclePhase {
+        if let inf = context.inference, inf.confidence >= 0.5 { return inf.phase }
+        return summary.phase
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -42,7 +46,7 @@ struct RecommendationCard: View {
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: rec.icon)
                         .font(.body)
-                        .foregroundStyle(summary.phase.tint)
+                        .foregroundStyle(displayPhase.tint)
                         .frame(width: 22)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(rec.title).font(.callout.weight(.semibold))
@@ -68,7 +72,7 @@ struct RecommendationCard: View {
             }
         } else if engine.source == .ai {
             Label("On-device AI", systemImage: "sparkles")
-                .font(.caption2).foregroundStyle(summary.phase.tint)
+                .font(.caption2).foregroundStyle(displayPhase.tint)
                 .labelStyle(.titleAndIcon)
         }
     }

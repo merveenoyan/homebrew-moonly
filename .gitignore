@@ -13,3 +13,6 @@ dist/
 # Models are never committed — they are downloaded at install time
 *.gguf
 Sources/moonly/Resources/*.gguf
+
+# Editor / agent tooling
+.claude/
