@@ -34,6 +34,28 @@ enum CyclePhase: String, Codable, CaseIterable, Identifiable {
         }
     }
 
+    /// A short, at-a-glance read on how the day tends to feel for getting things
+    /// done — productivity climbs through follicular/ovulatory and eases off
+    /// around menstruation and the premenstrual stretch.
+    var vibe: String {
+        switch self {
+        case .menstrual:  return "A good day to chill and recharge"
+        case .follicular: return "A great day to lean into productivity"
+        case .ovulatory:  return "Peak energy — ideal for big pushes"
+        case .luteal:     return "Ease off the gas and wind down"
+        }
+    }
+
+    /// SF Symbol that pairs with the day's vibe.
+    var vibeSymbol: String {
+        switch self {
+        case .menstrual:  return "cup.and.saucer.fill"
+        case .follicular: return "bolt.fill"
+        case .ovulatory:  return "sun.max.fill"
+        case .luteal:     return "moon.zzz.fill"
+        }
+    }
+
     var systemImage: String {
         switch self {
         case .menstrual:  return "drop.fill"

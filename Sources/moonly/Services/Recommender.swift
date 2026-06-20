@@ -224,6 +224,15 @@ final class RecommendationEngine: ObservableObject {
     - You are NOT a doctor. Never diagnose, never name medications or dosages, \
     never make clinical claims. Suggest seeing a clinician for severe, unusual, or \
     persistent symptoms.
+    - Frame the day around energy and productivity: in follicular/ovulatory phases \
+    encourage leaning into focus, deep work and ambitious plans; around menstruation \
+    and the late-luteal/PMS stretch, encourage easing off, resting and keeping the \
+    day light.
+    - One of the three suggestions MAY be a gentle, generic nutrition or supplement \
+    tip relevant to the phase or the user's symptoms (e.g. magnesium for cramps, \
+    zinc for cycle-related breakouts, iron-rich foods during menstruation, omega-3s \
+    for inflammation). Keep it non-branded with NO doses, and prefer food sources. \
+    Skip it if nothing fits.
     - Be specific and practical. Each suggestion is a concrete action for today, \
     tied to the phase, the forecast, and the user's own patterns — not generic.
     - Respond ONLY with a JSON array of exactly 3 objects with keys "icon", \
@@ -385,6 +394,8 @@ final class RecommendationEngine: ObservableObject {
                       body: "Lean red meat, lentils, or leafy greens help offset menstrual iron loss."),
                 .init(icon: "figure.walk", title: "Light movement",
                       body: "A short walk or gentle yoga eases cramps better than sitting still."),
+                .init(icon: "leaf.fill", title: "Magnesium for cramps",
+                      body: "Magnesium relaxes uterine muscle; many find it eases cramps, often paired with omega-3s."),
             ]
         case .follicular:
             return [
@@ -394,6 +405,8 @@ final class RecommendationEngine: ObservableObject {
                       body: "Strength and stamina climb this week; a good window to push intensity."),
                 .init(icon: "fork.knife", title: "Fuel the build",
                       body: "Lean protein and complex carbs support the energy upswing."),
+                .init(icon: "leaf.fill", title: "B vitamins for energy",
+                      body: "B vitamins help estrogen metabolism and steady energy — wholegrains, eggs, and greens are easy sources."),
             ]
         case .ovulatory:
             return [
@@ -403,6 +416,8 @@ final class RecommendationEngine: ObservableObject {
                       body: "Energy crests today; lean into active, outward-facing work."),
                 .init(icon: "leaf.fill", title: "Anti-inflammatory plate",
                       body: "Colorful veg, omega-3s, and fiber support hormone balance around ovulation."),
+                .init(icon: "hands.sparkles.fill", title: "Zinc for skin",
+                      body: "Zinc is anti-inflammatory and often helps cycle-related breakouts; oysters, pumpkin seeds, and lentils are good sources."),
             ]
         case .luteal:
             return [
@@ -412,6 +427,8 @@ final class RecommendationEngine: ObservableObject {
                       body: "Irritability is common now; a few minutes writing can take the edge off."),
                 .init(icon: "moon.zzz.fill", title: "Protect sleep",
                       body: "Progesterone can disrupt rest; wind down early and keep the room cool."),
+                .init(icon: "leaf.fill", title: "Magnesium + B6 for PMS",
+                      body: "This combo has the strongest evidence for PMS mood, bloating, and cramps — it builds over a cycle or two."),
             ]
         }
     }

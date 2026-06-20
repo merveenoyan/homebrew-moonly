@@ -15,9 +15,34 @@ struct DropdownView: View {
     }
     private var summary: CycleSummary { context.summary }
 
+    /// PMS-type symptoms/moods logged in the last few days, most recent first —
+    /// used to confirm a genuine premenstrual "peak" rather than assuming it from
+    /// the calendar alone, and to name what triggered it.
+    private var recentPMSSigns: [String] {
+        let pmsSymptoms: Set<Symptom> = [
+            .cramps, .bloating, .breastTenderness, .headache,
+            .backache, .fatigue, .cravings, .acne,
+        ]
+        let pmsMoods: Set<Mood> = [.irritable, .anxious, .low]
+        var labels: [String] = []
+        for log in store.recentLogs(days: 4, on: today) {
+            for symptom in log.symptoms where pmsSymptoms.contains(symptom) {
+                let label = symptom.label.lowercased()
+                if !labels.contains(label) { labels.append(label) }
+            }
+            if let mood = log.mood, pmsMoods.contains(mood) {
+                let label = "\(mood.label.lowercased()) mood"
+                if !labels.contains(label) { labels.append(label) }
+            }
+        }
+        return labels
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            CycleHeaderView(summary: summary, inference: phaseEngine.inference)
+            CycleHeaderView(summary: summary,
+                            inference: phaseEngine.inference,
+                            recentPMSSigns: recentPMSSigns)
 
             Divider()
 

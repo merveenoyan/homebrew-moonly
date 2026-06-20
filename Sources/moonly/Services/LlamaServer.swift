@@ -67,10 +67,32 @@ final class LlamaServer: ObservableObject {
 
     /// Best-effort check for whether anything has been downloaded yet, so the UI
     /// can warn that first launch will pull ~5 GB.
-    var modelLikelyCached: Bool {
+    var modelLikelyCached: Bool { resolveCachedModel() != nil }
+
+    /// The GGUF files already present in the local HF cache, if any. The main
+    /// weights are the `.gguf` without "mmproj" in the name; the multimodal
+    /// projector (optional) is the one that does. Resolving these lets us launch
+    /// straight from disk with `-m`/`--mmproj` and never touch the network.
+    private func resolveCachedModel() -> (model: URL, mmproj: URL?)? {
         let fm = FileManager.default
-        guard let entries = try? fm.contentsOfDirectory(atPath: Self.cacheDir.path) else { return false }
-        return entries.contains { $0.hasSuffix(".gguf") }
+        guard let walker = fm.enumerator(at: Self.cacheDir,
+                                         includingPropertiesForKeys: [.isRegularFileKey],
+                                         options: [.skipsHiddenFiles]) else { return nil }
+        var model: URL?
+        var mmproj: URL?
+        for case let url as URL in walker where url.pathExtension == "gguf" {
+            // Follow symlinks (HF stores snapshots as links into blobs/) and
+            // skip anything that doesn't actually resolve to a file.
+            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+                || fm.fileExists(atPath: url.resolvingSymlinksInPath().path) else { continue }
+            if url.lastPathComponent.localizedCaseInsensitiveContains("mmproj") {
+                mmproj = mmproj ?? url
+            } else {
+                model = model ?? url
+            }
+        }
+        guard let model else { return nil }
+        return (model, mmproj)
     }
 
     /// Resolve `llama-server`: bundled copy first (if a future build ships one),
@@ -106,14 +128,27 @@ final class LlamaServer: ObservableObject {
 
         try? FileManager.default.createDirectory(at: Self.cacheDir, withIntermediateDirectories: true)
 
+        let cached = resolveCachedModel()
         status = .starting
-        detail = modelLikelyCached ? "Loading model…" : "Downloading model (~5 GB, first run only)…"
+        detail = cached != nil ? "Loading model…" : "Downloading model (~5 GB, first run only)…"
         port = Self.freePort()
+
+        // Prefer the already-downloaded files: launch with `-m`/`--mmproj` so
+        // llama.cpp never contacts Hugging Face. Only fall back to `-hf` (which
+        // checks the repo and downloads) when nothing is cached yet.
+        var modelArgs: [String]
+        if let cached {
+            modelArgs = ["-m", cached.model.path]
+            if let mmproj = cached.mmproj {
+                modelArgs += ["--mmproj", mmproj.path]
+            }
+        } else {
+            modelArgs = ["-hf", Self.modelRepo]
+        }
 
         let proc = Process()
         proc.executableURL = binary
-        proc.arguments = [
-            "-hf", Self.modelRepo,   // download (if needed) + cache + serve, one command
+        proc.arguments = modelArgs + [
             "--host", "127.0.0.1",
             "--port", String(port),
             "-c", "4096",
