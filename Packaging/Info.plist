@@ -23,13 +23,8 @@
 	<key>LSUIElement</key>
 	<true/>
 
-	<!-- Inference talks to a local llama-server over plain HTTP on 127.0.0.1.
-	     Allow local networking; nothing else is permitted out. -->
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSAllowsLocalNetworking</key>
-		<true/>
-	</dict>
+	<!-- The only network egress is the one-time, inbound model download from
+	     huggingface.co over HTTPS (allowed by default ATS). -->
 
 	<key>NSHumanReadableCopyright</key>
 	<string>Moonly — on-device cycle tracking. Your data never leaves this Mac.</string>

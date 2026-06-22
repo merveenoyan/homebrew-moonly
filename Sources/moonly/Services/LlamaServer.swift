@@ -1,32 +1,40 @@
 import Foundation
 import Combine
-import Darwin
-import AppKit
+import LlamaKit
 
-/// Manages a local `llama-server` child process serving Gemma 4 E4B (QAT) and
-/// talks to it over its OpenAI-compatible HTTP API.
+/// Runs Gemma 4 E4B (QAT) **in-process** via LlamaKit (a Swift wrapper around
+/// llama.cpp), instead of shelling out to a separate `llama-server` binary.
 ///
-/// Design follows ggml-org's Llama.app: we don't bundle the engine, we share
-/// the Homebrew `llama.cpp` install, and we let llama.cpp's own `-hf` flag
-/// handle download + cache + serve in a single command:
+/// The GGUF is downloaded from the Hugging Face Hub on first use (LlamaKit's
+/// `Hub` trait) into the app-owned cache under Application Support, then loaded
+/// straight from disk on subsequent runs. Generation is fully local — the only
+/// network egress is the one-time, inbound model download from Hugging Face.
 ///
-///     llama-server -hf google/gemma-4-E4B-it-qat-q4_0-gguf
-///
-/// The model is cached under the app's Application Support dir (LLAMA_CACHE),
-/// the server is bound to 127.0.0.1 on an ephemeral port, and the app makes no
-/// other network calls. Nothing leaves the machine except the one-time,
-/// inbound model download from Hugging Face.
+/// The public surface (``status``, ``detail``, ``ensureRunning()``, ``stop()``,
+/// ``chat(system:user:temperature:maxTokens:)``) is unchanged from the previous
+/// process-based implementation, so callers don't need to know the engine moved
+/// in-process. ``stop()`` releases the model + session to free memory, matching
+/// the old "shut the server down after each inference" behavior.
 @MainActor
 final class LlamaServer: ObservableObject {
     static let shared = LlamaServer()
 
-    /// The single source of model truth — passed straight to `-hf`.
+    /// The single source of model truth — the Hugging Face repo we pull from.
     static let modelRepo = "google/gemma-4-E4B-it-qat-q4_0-gguf"
 
+    /// Glob matching the main weights inside the repo (e.g.
+    /// `gemma-4-E4B_q4_0-it.gguf`). The `q4_0` filter keeps us off the optional
+    /// multimodal `*-mmproj.gguf` projector (text-only here). Matched with
+    /// `LIKE[c]`, so the wildcards must straddle the `q4_0` token in the middle.
+    static let modelFilePattern = "*q4_0*.gguf"
+
+    /// Session context window (and single-batch capacity). Sized for the longest
+    /// prompt — phase inference with several cycles of daily logs — plus output.
+    static let contextTokens: UInt32 = 8192
+
     enum Status: Equatable {
-        case idle            // not started yet
-        case missingBinary   // llama-server not found (llama.cpp not installed)
-        case starting        // launching / loading / downloading on first run
+        case idle            // not loaded yet
+        case starting        // loading / downloading on first run
         case ready
         case generating
         case failed(String)
@@ -40,186 +48,109 @@ final class LlamaServer: ObservableObject {
     /// Human-readable sub-state (e.g. "Downloading model…"), surfaced in the UI.
     @Published private(set) var detail: String?
 
-    private var process: Process?
-    private var port: UInt16 = 0
-    private let session: URLSession = {
-        let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 300
-        cfg.waitsForConnectivity = false
-        return URLSession(configuration: cfg)
-    }()
+    private var model: LlamaModel?
+    private var session: LlamaSession?
 
     private init() {
-        NotificationCenter.default.addObserver(
-            forName: NSApplication.willTerminateNotification,
-            object: nil, queue: .main
-        ) { [weak self] _ in self?.process?.terminate() }
+        // Point swift-huggingface at our app-owned cache so the GGUF lives
+        // somewhere predictable and `brew uninstall` (zap) can wipe it. Must be
+        // set before the first Hub download.
+        try? FileManager.default.createDirectory(at: Self.cacheDir, withIntermediateDirectories: true)
+        setenv("HF_HUB_CACHE", Self.cacheDir.path, 1)
     }
 
     // MARK: - Filesystem locations
 
-    /// App-owned model cache. Passed to llama.cpp via the LLAMA_CACHE env var so
-    /// the GGUF lives somewhere predictable and `brew uninstall` can wipe it.
+    /// App-owned model cache (Python-compatible HF layout: blobs/snapshots/refs).
     static var cacheDir: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Moonly/models", isDirectory: true)
     }
 
-    /// Best-effort check for whether anything has been downloaded yet, so the UI
-    /// can warn that first launch will pull ~5 GB.
-    var modelLikelyCached: Bool { resolveCachedModel() != nil }
-
-    /// The GGUF files already present in the local HF cache, if any. The main
-    /// weights are the `.gguf` without "mmproj" in the name; the multimodal
-    /// projector (optional) is the one that does. Resolving these lets us launch
-    /// straight from disk with `-m`/`--mmproj` and never touch the network.
-    private func resolveCachedModel() -> (model: URL, mmproj: URL?)? {
+    /// Best-effort check for whether the weights have been downloaded yet, so the
+    /// UI can warn that first launch will pull ~5 GB. Walks the cache for a
+    /// non-`mmproj` `.gguf`.
+    var modelLikelyCached: Bool {
         let fm = FileManager.default
         guard let walker = fm.enumerator(at: Self.cacheDir,
-                                         includingPropertiesForKeys: [.isRegularFileKey],
-                                         options: [.skipsHiddenFiles]) else { return nil }
-        var model: URL?
-        var mmproj: URL?
+                                         includingPropertiesForKeys: nil,
+                                         options: [.skipsHiddenFiles]) else { return false }
         for case let url as URL in walker where url.pathExtension == "gguf" {
-            // Follow symlinks (HF stores snapshots as links into blobs/) and
-            // skip anything that doesn't actually resolve to a file.
-            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
-                || fm.fileExists(atPath: url.resolvingSymlinksInPath().path) else { continue }
-            if url.lastPathComponent.localizedCaseInsensitiveContains("mmproj") {
-                mmproj = mmproj ?? url
-            } else {
-                model = model ?? url
-            }
+            if !url.lastPathComponent.localizedCaseInsensitiveContains("mmproj") { return true }
         }
-        guard let model else { return nil }
-        return (model, mmproj)
-    }
-
-    /// Resolve `llama-server`: bundled copy first (if a future build ships one),
-    /// then the Homebrew install locations, then PATH.
-    private func resolveBinary() -> URL? {
-        let candidates = [
-            Bundle.main.resourceURL?.appendingPathComponent("bin/llama-server"),
-            URL(fileURLWithPath: "/opt/homebrew/bin/llama-server"),
-            URL(fileURLWithPath: "/usr/local/bin/llama-server"),
-        ].compactMap { $0 }
-
-        let fm = FileManager.default
-        if let found = candidates.first(where: { fm.isExecutableFile(atPath: $0.path) }) { return found }
-        if let path = ProcessInfo.processInfo.environment["PATH"] {
-            for dir in path.split(separator: ":") {
-                let c = URL(fileURLWithPath: String(dir)).appendingPathComponent("llama-server")
-                if fm.isExecutableFile(atPath: c.path) { return c }
-            }
-        }
-        return nil
+        return false
     }
 
     // MARK: - Lifecycle
 
-    /// Idempotently bring the server up. Safe to call repeatedly.
+    /// Idempotently load the model + session. Safe to call repeatedly.
     func ensureRunning() async {
         switch status {
         case .ready, .generating, .starting: return
         default: break
         }
 
-        guard let binary = resolveBinary() else { status = .missingBinary; return }
-
-        try? FileManager.default.createDirectory(at: Self.cacheDir, withIntermediateDirectories: true)
-
-        let cached = resolveCachedModel()
+        // Decide the verb once, up front. When the weights are already cached,
+        // swift-huggingface still fires progress callbacks (its first tick is at
+        // 0%) while it verifies the snapshot — so keying the message off the
+        // progress fraction would briefly flash a misleading "Downloading…".
+        // A cached run is really just loading, so we say so and ignore the ticks.
+        let alreadyCached = modelLikelyCached
         status = .starting
-        detail = cached != nil ? "Loading model…" : "Downloading model (~5 GB, first run only)…"
-        port = Self.freePort()
-
-        // Prefer the already-downloaded files: launch with `-m`/`--mmproj` so
-        // llama.cpp never contacts Hugging Face. Only fall back to `-hf` (which
-        // checks the repo and downloads) when nothing is cached yet.
-        var modelArgs: [String]
-        if let cached {
-            modelArgs = ["-m", cached.model.path]
-            if let mmproj = cached.mmproj {
-                modelArgs += ["--mmproj", mmproj.path]
-            }
-        } else {
-            modelArgs = ["-hf", Self.modelRepo]
-        }
-
-        let proc = Process()
-        proc.executableURL = binary
-        proc.arguments = modelArgs + [
-            "--host", "127.0.0.1",
-            "--port", String(port),
-            "-c", "4096",
-            "-ngl", "999",           // offload all layers to Metal on Apple Silicon
-            "--jinja",               // use Gemma's embedded chat template
-            "--no-webui",
-        ]
-        var env = ProcessInfo.processInfo.environment
-        env["LLAMA_CACHE"] = Self.cacheDir.path
-        proc.environment = env
-
-        // Tail stderr so we can show "Downloading…" vs "Loading…" in the UI.
-        let errPipe = Pipe()
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = errPipe
-        errPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            guard let line = String(data: handle.availableData, encoding: .utf8), !line.isEmpty else { return }
-            let lower = line.lowercased()
-            Task { @MainActor in
-                guard let self, self.status == .starting else { return }
-                if lower.contains("download") || lower.contains("%") {
-                    self.detail = "Downloading model (~5 GB, first run only)…"
-                } else if lower.contains("loading model") || lower.contains("load_tensors") {
-                    self.detail = "Loading model…"
-                }
-            }
-        }
-
-        proc.terminationHandler = { [weak self] p in
-            Task { @MainActor in
-                guard let self, self.process === p else { return }
-                if self.status != .idle {
-                    self.status = .failed("llama-server exited (code \(p.terminationStatus))")
-                    self.detail = nil
-                }
-                self.process = nil
-            }
-        }
+        detail = alreadyCached ? "Loading model…" : "Downloading model (~5 GB, first run only)…"
 
         do {
-            try proc.run()
-            self.process = proc
+            // `from` downloads (if needed) and loads the GGUF off the main actor.
+            // `gpuLayerCount: -1` offloads all layers to Metal on Apple Silicon.
+            let loaded = try await LlamaModel.from(
+                repo: Self.modelRepo,
+                filename: Self.modelFilePattern,
+                parameters: LlamaModel.Parameters(gpuLayerCount: -1),
+                progress: { [weak self] progress in
+                    Task { @MainActor in
+                        guard let self, self.status == .starting else { return }
+                        guard !alreadyCached else { self.detail = "Loading model…"; return }
+                        if progress.fractionCompleted < 1.0 {
+                            let pct = Int(progress.fractionCompleted * 100)
+                            self.detail = "Downloading model… \(pct)% (first run only)"
+                        } else {
+                            self.detail = "Loading model…"
+                        }
+                    }
+                }
+            )
+
+            detail = "Loading model…"
+            // Build the session off the main actor — context allocation is heavy.
+            // 8192 gives headroom for the heaviest prompt: phase inference embeds
+            // up to 3 full cycles of per-day logs (the old `-c 4096` was already
+            // ~70% full on a busy month). batchSize must track contextLength since
+            // LlamaKit decodes the whole prompt in a single batch.
+            let params = LlamaSession.Parameters(
+                contextLength: Self.contextTokens,
+                batchSize: Self.contextTokens,
+                physicalBatchSize: 512
+            )
+            let createdSession = try await Task.detached(priority: .userInitiated) {
+                try LlamaSession(model: loaded, parameters: params)
+            }.value
+
+            model = loaded
+            session = createdSession
+            status = .ready
+            detail = nil
         } catch {
-            status = .failed("Couldn't launch llama-server: \(error.localizedDescription)")
-            return
+            model = nil
+            session = nil
+            status = .failed("Couldn't load the model: \(error.localizedDescription)")
+            detail = nil
         }
-
-        // First run may download several GB, so allow a long startup window.
-        await waitForHealth(timeout: modelLikelyCached ? 120 : 3600)
-        errPipe.fileHandleForReading.readabilityHandler = nil
     }
 
-    private func waitForHealth(timeout: TimeInterval) async {
-        let deadline = Date().addingTimeInterval(timeout)
-        let healthURL = URL(string: "http://127.0.0.1:\(port)/health")!
-        while Date() < deadline {
-            if process?.isRunning != true {
-                status = .failed("llama-server stopped during startup"); detail = nil; return
-            }
-            if let (_, resp) = try? await session.data(from: healthURL),
-               (resp as? HTTPURLResponse)?.statusCode == 200 {
-                status = .ready; detail = nil; return
-            }
-            try? await Task.sleep(nanoseconds: 800_000_000)
-        }
-        status = .failed("llama-server didn't become ready in time"); detail = nil
-    }
-
+    /// Release the model + session to free memory (Metal buffers + KV cache).
     func stop() {
-        process?.terminate()
-        process = nil
+        session = nil
+        model = nil
         status = .idle
         detail = nil
     }
@@ -232,82 +163,47 @@ final class LlamaServer: ObservableObject {
     func chat(system: String, user: String,
               temperature: Double = 0.7, maxTokens: Int = 400) async throws -> String {
         if !status.isUsable { await ensureRunning() }
-        guard status.isUsable else { throw LlamaError.notReady(status) }
+        guard status.isUsable, let model, let session else { throw LlamaError.notReady(status) }
 
         status = .generating
         defer { if status == .generating { status = .ready } }
 
-        struct Request: Codable {
-            let model: String
-            let messages: [ChatMessage]
-            let temperature: Double
-            let top_p: Double
-            let top_k: Int
-            let max_tokens: Int
-            let stream: Bool
-        }
-        let body = Request(
-            model: "gemma-4-e4b",
-            messages: [.init(role: "system", content: system),
-                       .init(role: "user", content: user)],
-            temperature: temperature, top_p: 0.95, top_k: 64,
-            max_tokens: maxTokens, stream: false
+        _ = model // weights are held via `session`; prompt formatting is manual
+        let prompt = Self.renderPrompt(system: system, user: user)
+
+        // Mirror the previous sampling config: temperature with top_k 64 / top_p
+        // 0.95. Temperature 0 means deterministic greedy decoding.
+        let sampler: Sampler = temperature <= 0
+            ? .greedy
+            : .temperature(Float(temperature), topK: 64, topP: 0.95)
+
+        let text = try await session.complete(
+            prompt: prompt,
+            sampler: sampler,
+            maxTokens: maxTokens
         )
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
-        var req = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try JSONEncoder().encode(body)
-
-        let (data, resp) = try await session.data(for: req)
-        guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
-            throw LlamaError.badResponse((resp as? HTTPURLResponse)?.statusCode ?? -1)
-        }
-
-        struct Response: Codable {
-            struct Choice: Codable { struct Msg: Codable { let content: String }; let message: Msg }
-            let choices: [Choice]
-        }
-        let decoded = try JSONDecoder().decode(Response.self, from: data)
-        return (decoded.choices.first?.message.content ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Build the Gemma chat prompt manually.
+    ///
+    /// We deliberately don't use LlamaKit's `applyChatTemplate`: this model's
+    /// embedded template is a tool-calling Jinja macro template that neither
+    /// llama.cpp's built-in formatter nor swift-jinja can render, so both paths
+    /// throw. Gemma's wire format is simple and stable, and it has no system
+    /// role — system text is folded into the first user turn. The tokenizer adds
+    /// the leading BOS itself (`addSpecial: true` inside LlamaKit's generate),
+    /// so we must not prepend `<bos>` here.
+    private static func renderPrompt(system: String, user: String) -> String {
+        "<start_of_turn>user\n\(system)\n\n\(user)<end_of_turn>\n<start_of_turn>model\n"
     }
 
     enum LlamaError: LocalizedError {
         case notReady(Status)
-        case badResponse(Int)
         var errorDescription: String? {
             switch self {
-            case .notReady:           return "The local model isn't ready yet."
-            case .badResponse(let c): return "Model server returned HTTP \(c)."
+            case .notReady: return "The local model isn't ready yet."
             }
         }
-    }
-
-    // MARK: - Free port
-
-    /// Ask the kernel for an unused loopback port by binding to port 0.
-    private static func freePort() -> UInt16 {
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { return 49207 }
-        defer { close(fd) }
-
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-        addr.sin_port = 0
-
-        let bound = withUnsafePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        guard bound == 0 else { return 49207 }
-
-        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
-        _ = withUnsafeMutablePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) }
-        }
-        return UInt16(bigEndian: addr.sin_port)
     }
 }
