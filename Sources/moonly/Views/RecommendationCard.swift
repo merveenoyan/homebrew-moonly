@@ -82,9 +82,6 @@ struct RecommendationCard: View {
             Text(note).font(.caption2).foregroundStyle(.secondary)
         }
         switch llama.status {
-        case .missingBinary:
-            Text("llama.cpp not found — run `brew install llama.cpp` for AI tips.")
-                .font(.caption2).foregroundStyle(.orange)
         case .starting:
             HStack(spacing: 5) {
                 ProgressView().controlSize(.mini)
@@ -104,6 +101,6 @@ struct RecommendationCard: View {
     }
 
     private var llamaActionable: Bool {
-        switch llama.status { case .missingBinary, .starting, .generating: return false; default: return true }
+        switch llama.status { case .starting, .generating: return false; default: return true }
     }
 }

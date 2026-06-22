@@ -9,9 +9,8 @@ cask "moonly" do
   desc "On-device menstrual cycle tracker with local Gemma recommendations"
   homepage "https://github.com/merve/moonly"
 
-  # The engine is shared with the CLI rather than bundled (à la ggml-org's
-  # Llama.app). This provides `llama-server`, which the app drives with `-hf`.
-  depends_on formula: "llama.cpp"
+  # The llama.cpp engine ships inside the app (LlamaKit links it as an embedded
+  # framework), so there's no external runtime dependency to install.
   depends_on macos: :sonoma
 
   app "Moonly.app"
